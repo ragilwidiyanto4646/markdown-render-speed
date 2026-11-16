@@ -1,8 +1,10 @@
 # Fast marked-compatible Markdown renderer
 
-[![make.fun bounty](https://make.fun/badge/bounty/markdown-render-speed-02?r=ztnjpsw2)](https://make.fun/bounty/markdown-render-speed-02?r=ztnjpsw2)
-[![make.fun profile](https://make.fun/badge/profile/ragilwidiyanto4646?r=ztnjpsw2)](https://make.fun/r/ztnjpsw2)
-[![make.fun entry](https://make.fun/badge/entry/markdown-render-speed-02?r=ztnjpsw2)](https://make.fun/bounty/markdown-render-speed-02?r=ztnjpsw2)
+[![make.fun · markdown-render-speed-02](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![rank](https://make.fun/badge/markdown-render-speed-02/ragilwidiyanto4646/markdown-render-speed/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![reward](https://make.fun/badge/markdown-render-speed-02/ragilwidiyanto4646/markdown-render-speed/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+
+Referral: https://make.fun/r/ztnjpsw2
 
 A dependency-free, single-file Markdown renderer (`parse.js`) whose
 `parse(markdown)` output is byte-identical to `marked.parse(markdown)`

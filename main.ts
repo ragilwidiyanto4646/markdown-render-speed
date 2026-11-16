@@ -1,30 +1,33 @@
-// Driver for the markdown-render-speed-02 entry (final version).
+// Entry-point driver for the markdown-render-speed-02 submission.
 //
-// The grading harness executes `node /bot/main.ts` (Node 22) with the
-// cases mounted at /input/cases.json and expects the rendered HTML at
-// /output/html.json. Each case is an object {id, markdown}; the output is
-// a JSON array of HTML strings in exactly the cases' order, one per case.
+// The grading harness runs `node /bot/main.ts` (Node 22, type stripping)
+// with the case set mounted at /input/cases.json and collects the rendered
+// HTML from /output/html.json. The two locations can be moved with
+// MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR for local runs.
 //
-// Outside the grading container the same paths can be overridden through
-// the environment: MAKEFUN_INPUT_DIR replaces /input and
-// MAKEFUN_OUTPUT_DIR replaces /output. Rendering itself lives entirely
-// in ./parse.js (dependency-free, no network, no WASM); this file only
-// moves data in and out.
+// The driver does no rendering of its own: it reads the cases, hands each
+// markdown string to parse() from ./parse.js, and writes the HTML strings
+// back out in exactly the cases' order. parse.js is dependency-free and
+// does no I/O, so the only work here is moving data in and out.
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from './parse.js';
 
-const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+function main(): void {
+  const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
+  const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-const rawCases = readFileSync(join(inputDir, 'cases.json'), 'utf8');
-const cases = JSON.parse(rawCases) as Array<{ id: string; markdown: string }>;
+  const text = readFileSync(join(inputDir, 'cases.json'), 'utf8');
+  const cases = JSON.parse(text) as Array<{ id: string; markdown: string }>;
 
-const rendered: string[] = new Array(cases.length);
-for (let index = 0; index < cases.length; index++) {
-  rendered[index] = parse(cases[index].markdown);
+  const html: string[] = new Array(cases.length);
+  for (let i = 0; i < cases.length; i++) {
+    html[i] = parse(cases[i].markdown);
+  }
+
+  mkdirSync(outputDir, { recursive: true });
+  writeFileSync(join(outputDir, 'html.json'), JSON.stringify(html));
 }
 
-mkdirSync(outputDir, { recursive: true });
-writeFileSync(join(outputDir, 'html.json'), JSON.stringify(rendered));
+main();

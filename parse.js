@@ -801,6 +801,182 @@ function linkInText(s, links) {
   return false;
 }
 
+function isPunctCp(cp) {
+  if (cp < 128) return isAsciiPunctCode(cp);
+  return UNI_PUNCT.test(String.fromCodePoint(cp));
+}
+
+// Manual equivalent of t.replace(ANY_PUNCT_CODE, ...) in maskedSrc: mask
+// code spans (inner backticks -> '+') and backslash-escaped punctuation
+// ('\X' -> '++'); a backtick run with no closing run of the same length is
+// left unchanged (the regex's bare-`+` alternative sets no group, so its
+// callback returns the match as-is). Returns t unchanged when nothing
+// matches. (The regex it replaces is
+// /(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|`+|\\([\p{P}\p{S}])/gu.)
+function maskPunctCode(t) {
+  const n = t.length;
+  let parts = null, last = 0;
+  let i = 0;
+  while (i < n) {
+    const c = t.charCodeAt(i);
+    if (c === 96) { // '`'
+      let runEnd = i + 1;
+      while (runEnd < n && t.charCodeAt(runEnd) === 96) runEnd++;
+      const runLen = runEnd - i;
+      // Alt 1 (code span): closing run of the same length, content's first
+      // and last chars non-backtick; earliest such run wins (lazy content).
+      let close = -1;
+      if (runEnd < n && t.charCodeAt(runEnd) !== 96) {
+        let j = runEnd + 1;
+        while (j < n) {
+          if (t.charCodeAt(j) === 96) {
+            let k = j + 1;
+            while (k < n && t.charCodeAt(k) === 96) k++;
+            if (k - j === runLen && (k >= n || t.charCodeAt(k) !== 96)) { close = j; break; }
+            j = k;
+          } else j++;
+        }
+      }
+      if (close !== -1) {
+        if (parts === null) parts = [];
+        parts.push(t.slice(last, i));
+        const run = t.slice(i, runEnd);
+        parts.push(run, t.slice(runEnd, close).replace(/`/g, '+'), run);
+        last = close + runLen;
+        i = last;
+      } else {
+        // Alt 2 (a lone backtick run): the regex matches it, but group 1
+        // does not participate, so the callback returns it unchanged.
+        i = runEnd;
+      }
+    } else if (c === 92 && i + 1 < n) { // '\\'
+      const cp = t.codePointAt(i + 1);
+      if (isPunctCp(cp)) {
+        const len = 1 + (cp > 0xFFFF ? 2 : 1);
+        if (parts === null) parts = [];
+        parts.push(t.slice(last, i), '+'.repeat(len));
+        last = i + len;
+        i = last;
+      } else i++;
+    } else i++;
+  }
+  if (parts === null) return t;
+  parts.push(t.slice(last));
+  return parts.join('');
+}
+
+// Try BLOCK_SKIP's link alternative at t[i] === '[': label (plain chars or
+// code spans, no '['/']' outside a code span) + '(' + destination (with one
+// level of nested parens, backslash escapes) + ')'. Returns end index or -1.
+function matchBlockLink(t, i) {
+  const n = t.length;
+  let j = i + 1;
+  while (true) {
+    if (j >= n) return -1;
+    const c = t.charCodeAt(j);
+    if (c === 93) { // ']' — label ends; destination must follow
+      if (j + 1 >= n || t.charCodeAt(j + 1) !== 40) return -1;
+      return matchLinkDest(t, j + 2);
+    }
+    if (c === 91) return -1; // '[' cannot appear in a label
+    if (c === 96) { // '`' — code span inside the label
+      let runEnd = j + 1;
+      while (runEnd < n && t.charCodeAt(runEnd) === 96) runEnd++;
+      const runLen = runEnd - j;
+      let k = runEnd;
+      while (k < n && t.charCodeAt(k) !== 96) k++;
+      if (k >= n) return -1;
+      let kEnd = k + 1;
+      while (kEnd < n && t.charCodeAt(kEnd) === 96) kEnd++;
+      if (kEnd - k !== runLen || (kEnd < n && t.charCodeAt(kEnd) === 96)) return -1;
+      j = kEnd;
+      continue;
+    }
+    j++;
+  }
+}
+function matchLinkDest(t, p) {
+  const n = t.length;
+  let q = p;
+  while (true) {
+    if (q >= n) return -1;
+    const c = t.charCodeAt(q);
+    if (c === 92) { q += 2; continue; }
+    if (c === 40) { // '(' — one level of nested parens
+      let r = q + 1;
+      while (true) {
+        if (r >= n) return -1;
+        const d = t.charCodeAt(r);
+        if (d === 92) { r += 2; continue; }
+        if (d === 41) break;
+        if (d === 40) return -1;
+        r++;
+      }
+      q = r + 1;
+      continue;
+    }
+    if (c === 41) return q + 1; // ')' ends the destination
+    q++;
+  }
+}
+
+// Manual equivalent of t.replace(BLOCK_SKIP, ...) in maskedSrc: mask each
+// matched span (inline-link [..](..), code span, <...> tag) with
+// '[' + 'a'*(len-2) + ']'. Returns t unchanged when nothing matches.
+function maskBlockSkip(t) {
+  const n = t.length;
+  let parts = null, last = 0;
+  let i = 0;
+  while (i < n) {
+    const c = t.charCodeAt(i);
+    if (c === 91) { // '['
+      const end = matchBlockLink(t, i);
+      if (end !== -1) {
+        if (parts === null) parts = [];
+        parts.push(t.slice(last, i), '[' + 'a'.repeat(end - i - 2) + ']');
+        last = end;
+        i = end;
+      } else i++;
+    } else if (c === 96) { // '`' — code span (not preceded by '`': runs are atomic)
+      let runEnd = i + 1;
+      while (runEnd < n && t.charCodeAt(runEnd) === 96) runEnd++;
+      const runLen = runEnd - i;
+      let close = -1;
+      let k = runEnd;
+      while (k < n && t.charCodeAt(k) !== 96) k++;
+      if (k < n) {
+        let kEnd = k + 1;
+        while (kEnd < n && t.charCodeAt(kEnd) === 96) kEnd++;
+        if (kEnd - k === runLen && (kEnd >= n || t.charCodeAt(kEnd) !== 96)) close = k;
+      }
+      if (close !== -1) {
+        const end = close + runLen;
+        if (parts === null) parts = [];
+        parts.push(t.slice(last, i), '[' + 'a'.repeat(end - i - 2) + ']');
+        last = end;
+        i = end;
+      } else {
+        i = runEnd; // no match: skip the whole run (a later backtick inside
+        // the run can never start a span: it is preceded by '`')
+      }
+    } else if (c === 60) { // '<'
+      if (i + 1 < n && t.charCodeAt(i + 1) === 32) { i++; continue; }
+      let j = i + 1;
+      while (j < n && t.charCodeAt(j) !== 62 && t.charCodeAt(j) !== 60) j++;
+      if (j < n && t.charCodeAt(j) === 62) {
+        const end = j + 1;
+        if (parts === null) parts = [];
+        parts.push(t.slice(last, i), '[' + 'a'.repeat(end - i - 2) + ']');
+        last = end;
+        i = end;
+      } else i++;
+    } else i++;
+  }
+  if (parts === null) return t;
+  parts.push(t.slice(last));
+  return parts.join('');
+}
+
 // Masked source: code spans, link destinations and reflink labels are
 // replaced by same-length placeholders so the emphasis closer search does
 // not see delimiters inside them.
@@ -820,13 +996,10 @@ function maskedSrc(src, links) {
   }
   // Cheap pre-checks: each replacement is a no-op without its trigger chars.
   if (src.includes('`') || src.includes('\\')) {
-    t = t.replace(ANY_PUNCT_CODE, (n, s, r) => r ? '+'.repeat(n.length) : s ? s + n.slice(s.length, -s.length).replace(/`/g, '+') + s : n);
+    t = maskPunctCode(t);
   }
-  if (src.includes('[') || src.includes('`') || src.includes('<')) {
-    t = t.replace(BLOCK_SKIP, (n, s, r) => {
-      const o = r ? r.length : 0;
-      return n.slice(0, o) + '[' + 'a'.repeat(n.length - o - 2) + ']';
-    });
+  if (src.includes('](') || src.includes('`') || src.includes('<')) {
+    t = maskBlockSkip(t);
   }
   return t;
 }
@@ -836,14 +1009,14 @@ function lastPossibleCloser(masked) {
   let star = -1, und = -1, tilde = -1;
   const n = masked.length;
   for (let s = 0; s < n; s++) {
-    const r = masked[s];
-    if (r !== '*' && r !== '_' && r !== '~') continue;
-    const o = s === 0 ? '\n' : masked[s - 1];
+    const cc = masked.charCodeAt(s);
+    if (cc !== 42 && cc !== 95 && cc !== 126) continue;
+    const o = s === 0 ? 10 : masked.charCodeAt(s - 1);
     let i = s + 1;
-    while (i < n && masked[i] === r) i++;
-    if (o !== ' ' && o !== '\t' && o !== '\n' && o !== '\r' && o !== '\f') {
-      if (r === '~') tilde = s;
-      else if (r === '*') star = s;
+    while (i < n && masked.charCodeAt(i) === cc) i++;
+    if (o !== 32 && o !== 9 && o !== 10 && o !== 13 && o !== 12) {
+      if (cc === 126) tilde = s;
+      else if (cc === 42) star = s;
       else und = s;
     }
     s = i - 1;
@@ -856,7 +1029,14 @@ function lastPossibleCloser(masked) {
 // closer indices, prev = the previous char (see inlineParse), links/st for
 // the recursive inner parse. Returns {tag, raw, text} or null.
 function tryEmStrong(src, i, masked, last, prev) {
-  const e = src.slice(i);
+  const r0 = src[i];
+  let runEnd = i;
+  while (runEnd < src.length && src[runEnd] === r0) runEnd++;
+  // EM_L only reads the delimiter run + one following char — but that char
+  // must be a whole code point: slicing an astral char in half changes its
+  // \p{P}/\p{S} classification (e.g. 🚀) and flips the opener rule.
+  const cpLen = runEnd < src.length ? (src.codePointAt(runEnd) > 0xFFFF ? 2 : 1) : 0;
+  const e = src.slice(i, runEnd + cpLen);
   const s = EM_L.exec(e);
   if (!s || (!s[1] && !s[2] && !s[3] && !s[4])) return null;
   const r = s[0][0];
@@ -880,7 +1060,17 @@ function tryEmStrong(src, i, masked, last, prev) {
   const v = r === '*' ? last.star : last.und;
   const Q = pos + k;
   if (v < Q) return null;
-  const t = masked.slice(pos + k);
+  // The closer search only needs text up to the last possible closer run
+  // (+ the run itself + one lookahead char, a whole code point); never
+  // slice the whole tail. The regex's first ("skip") alternative can look
+  // ahead to a `__` (for *) / `**` (for _) after that run, so extend the
+  // window to the first such pair when it lies beyond the run.
+  let vRunEnd = v;
+  while (vRunEnd < masked.length && masked[vRunEnd] === r) vRunEnd++;
+  let winEnd = vRunEnd + (vRunEnd < masked.length ? (masked.codePointAt(vRunEnd) > 0xFFFF ? 2 : 1) : 0);
+  const pair = r === '*' ? masked.indexOf('__', vRunEnd) : masked.indexOf('**', vRunEnd);
+  if (pair !== -1 && pair + 2 > winEnd) winEnd = pair + 2;
+  const t = masked.slice(pos + k, winEnd);
   const ee = v - Q;
   let m = k, f = 0;
   A.lastIndex = 0;
@@ -898,7 +1088,7 @@ function tryEmStrong(src, i, masked, last, prev) {
     if (m > 0) continue;
     const bb = Math.min(b, b + m + f);
     const te = [...mt[0]][0].length;
-    const M = e.slice(0, k + mt.index + te + bb);
+    const M = src.slice(i, i + k + mt.index + te + bb);
     if (Math.min(k, bb) % 2) {
       const U = M.slice(1, -1);
       return { tag: 'em', raw: M, text: U };
@@ -911,7 +1101,12 @@ function tryEmStrong(src, i, masked, last, prev) {
 
 // Try marked's del tokeniser at src[i] (a '~' run). Same conventions.
 function tryDel(src, i, masked, last, prev) {
-  const e = src.slice(i);
+  // DEL_L only reads at most two tildes + one following char (a whole
+  // code point, for the same astral reason as in tryEmStrong).
+  let tilEnd = i;
+  while (tilEnd < src.length && src[tilEnd] === '~' && tilEnd - i < 2) tilEnd++;
+  const cpLen = tilEnd < src.length ? (src.codePointAt(tilEnd) > 0xFFFF ? 2 : 1) : 0;
+  const e = src.slice(i, tilEnd + cpLen);
   const s = DEL_L.exec(e);
   if (!s) return null;
   if (!(s[1] || '') && prev && !PUNCT1.exec(prev)) return null;
@@ -919,7 +1114,9 @@ function tryDel(src, i, masked, last, prev) {
   const u = last.tilde;
   const d = i + o;
   if (u < d) return null;
-  const t = masked.slice(i + o);
+  let uRunEnd = u;
+  while (uRunEnd < masked.length && masked[uRunEnd] === '~') uRunEnd++;
+  const t = masked.slice(i + o, uRunEnd + (uRunEnd < masked.length ? (masked.codePointAt(uRunEnd) > 0xFFFF ? 2 : 1) : 0));
   const kk = u - d;
   let p = o;
   DEL_R.lastIndex = 0;
@@ -934,7 +1131,7 @@ function tryDel(src, i, masked, last, prev) {
     if (p > 0) continue;
     const ll = Math.min(l, l + p);
     const gg = [...mt[0]][0].length;
-    const b = e.slice(0, o + mt.index + gg + ll);
+    const b = src.slice(i, i + o + mt.index + gg + ll);
     const m = b.slice(o, -o);
     return { tag: 'del', raw: b, text: m };
   }
@@ -1145,19 +1342,17 @@ function inlineParse(src, links, st, parenPossible) {
   const pushNonText = (it) => { lastWasText = false; items.push(it); };
   const flushText = () => { if (textBuf) { pushTextItem(textBuf, textEsc); textBuf = ''; } };
   // Lazily computed masked source + last-possible closer indices (only when
-  // the text contains a delimiter char).
+  // the text contains a delimiter char). Inlined at the call sites below
+  // (a closure call per delimiter was measurable in the profile).
   let masked = null, last = null;
-  const needMask = () => {
-    if (masked === null) {
-      masked = (src.includes('*') || src.includes('_') || src.includes('~')) ? maskedSrc(src, links) : src;
-      last = lastPossibleCloser(masked);
-    }
-  };
 
   while (i < n) {
     const c = src[i];
     if (c === '*' || c === '_') {
-      needMask();
+      if (masked === null) {
+        masked = (src.includes('*') || src.includes('_') || src.includes('~')) ? maskedSrc(src, links) : src;
+        last = lastPossibleCloser(masked);
+      }
       flushText();
       const em = tryEmStrong(src, i, masked, last, lastWasText ? prevR : '');
       if (em) {
@@ -1171,7 +1366,10 @@ function inlineParse(src, links, st, parenPossible) {
       continue;
     }
     if (c === '~') {
-      needMask();
+      if (masked === null) {
+        masked = (src.includes('*') || src.includes('_') || src.includes('~')) ? maskedSrc(src, links) : src;
+        last = lastPossibleCloser(masked);
+      }
       flushText();
       const dl = tryDel(src, i, masked, last, lastWasText ? prevR : '');
       if (dl) {
@@ -1273,14 +1471,19 @@ function inlineParse(src, links, st, parenPossible) {
       }
     }
     if (!st.inLink) {
-      const u = matchGfmUrl(src, i);
-      if (u) {
+      // A GFM autolink can only start with an email-local char
+      // (letters/digits . _ + - cover mailto:/xmpp:/http(s)://ftp://www.).
+      const cc = c.charCodeAt(0);
+      if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 46 || cc === 95 || cc === 43 || cc === 45) {
+        const u = matchGfmUrl(src, i);
+        if (u) {
         flushText();
         const href = encodeHref(u.href);
         if (href === null) pushNonText({ k: 1, s: esc(u.text, true), plain: u.text });
         else pushNonText({ k: 1, s: '<a href="' + esc(href, true) + '">' + esc(u.text, true) + '</a>', plain: u.text });
         i = u.end;
         continue;
+        }
       }
     }
     const end = scanText(src, i);
@@ -1324,6 +1527,7 @@ function lineInfo(src, i) {
   return _liVal;
 }
 function expandTabs(s, startCol) {
+  if (s.indexOf('\t') === -1) return s;
   let col = startCol, out = '';
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
@@ -1912,13 +2116,13 @@ function stripTrailingNewlines(s) {
   return s.slice(0, e);
 }
 function expandLeadingWs(s, startCol) {
-  let i = 0;
-  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
-  if (i === 0) return s;
+  let i = 0, hasTab = false;
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) { if (s[i] === '\t') hasTab = true; i++; }
+  if (i === 0 || !hasTab) return s;
   return expandTabs(s.slice(0, i), startCol) + s.slice(i);
 }
 function firstNonSpace(s) {
-  for (let i = 0; i < s.length; i++) if (s[i] !== ' ') return i;
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) !== 32) return i;
   return -1;
 }
 // Index of the first non-space char in s with every tab replaced by 4
@@ -2488,6 +2692,29 @@ function tokenizeList(src, pos, ctx) {
       const RB = Math.min(3, Math.max(0, R - 1));
       const parts = [d];
       while (e < n) {
+        // Fast path: a new list-item line interrupts this item. This is
+        // exactly lineInterruptsList's bullet/ordered branches (lead
+        // spaces are space-only, as in lineLeadSpaces); skip the
+        // lineInfo/slice/expand work for the common single-line-item case.
+        let _ls = 0;
+        while (e + _ls < n && src[e + _ls] === ' ') _ls++;
+        if (_ls <= RB) {
+          const _cc = src[e + _ls];
+          if (_cc === '-' || _cc === '+' || _cc === '*') {
+            const _d = src[e + _ls + 1];
+            if (_d === undefined || _d === ' ' || _d === '\t') break;
+          } else if (_cc >= '0' && _cc <= '9') {
+            let _k = e + _ls;
+            while (_k < n && src[_k] >= '0' && src[_k] <= '9' && _k - (e + _ls) < 9) _k++;
+            if (_k - (e + _ls) > 0) {
+              const _d = src[_k];
+              if (_d === '.' || _d === ')') {
+                const _e2 = src[_k + 1];
+                if (_e2 === undefined || _e2 === ' ' || _e2 === '\t') break;
+              }
+            }
+          }
+        }
         const l3 = lineInfo(src, e);
         const U = src.slice(e, l3.end);
         const f2 = U;
@@ -2513,7 +2740,17 @@ function tokenizeList(src, pos, ctx) {
     const rawA = src.slice(itemStart, e);
     if (!loose) {
       if (p) loose = true;
-      else if (/\n[ \t]*\n[ \t]*$/.test(rawA)) p = true;
+      else {
+        // /\n[ \t]*\n[ \t]*$/.test(rawA), without a regex: trailing
+        // spaces/tabs, then \n, then spaces/tabs, then \n.
+        let e2 = rawA.length;
+        while (e2 > 0 && (rawA.charCodeAt(e2 - 1) === 32 || rawA.charCodeAt(e2 - 1) === 9)) e2--;
+        if (e2 > 0 && rawA.charCodeAt(e2 - 1) === 10) {
+          let e3 = e2 - 1;
+          while (e3 > 0 && (rawA.charCodeAt(e3 - 1) === 32 || rawA.charCodeAt(e3 - 1) === 9)) e3--;
+          if (e3 > 0 && rawA.charCodeAt(e3 - 1) === 10) p = true;
+        }
+      }
     }
     items.push({ type: 'list_item', raw: rawA, task: false, loose: false, text: d, tokens: [] });
   }
@@ -2789,7 +3026,12 @@ function renderTokens(tokens) {
 export function parse(markdown) {
   const src = String(markdown).replace(/\r\n|\r/g, '\n');
   const ctx = {
-    links: {},
+    // Null-prototype so link labels such as "__proto__" or "constructor"
+    // behave like ordinary labels (as in marked): an undefined ref stays
+    // literal text, and a defined one resolves to its own definition
+    // instead of leaking Object.prototype (which used to render
+    // href="undefined").
+    links: Object.create(null),
     top: true,
     inlineState: { inLink: false, inRawBlock: false, linkEmitted: false },
   };
